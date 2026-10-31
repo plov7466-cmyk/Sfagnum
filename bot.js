@@ -344,29 +344,26 @@ client.on('interactionCreate', async (interaction) => {
         // 3) Сабмит модалки → создаём тикет
         // ============================================
         if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal_')) {
+            // 🚀 СРАЗУ подтверждаем получение, чтобы не словить таймаут на хостинге
+            await interaction.deferReply({ ephemeral: true });
+
             const categoryKey = interaction.customId.replace('ticket_modal_', '');
             const category = config.TICKET_CATEGORIES?.[categoryKey];
             const user = interaction.user;
             const guild = interaction.guild;
 
             if (!category) {
-                return interaction.reply({
-                    content: '❌ Неизвестная категория.',
-                    ephemeral: true
-                });
+                return interaction.editReply({ content: '❌ Неизвестная категория.' });
             }
 
             const rawDescription = interaction.fields.getTextInputValue('ticket_description');
             const check = validateDescription(rawDescription);
             if (!check.ok) {
-                return interaction.reply({
+                return interaction.editReply({
                     content: `❌ Описание не принято: ${check.reason}.\n` +
-                             `Опиши проблему хотя бы одним предложением (минимум ${config.TICKET_DESCRIPTION_MIN} символов).`,
-                    ephemeral: true
+                             `Опиши проблему хотя бы одним предложением (минимум ${config.TICKET_DESCRIPTION_MIN} символов).`
                 });
             }
-
-            await interaction.deferReply({ ephemeral: true });
 
             const existing = findTicketByUser(user.id);
             if (existing && (existing.status === 'waiting' || existing.status === 'active')) {
