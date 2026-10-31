@@ -254,14 +254,10 @@ client.on('interactionCreate', async (interaction) => {
         // --- Открытие тикета: показываем селект категорий ---
         if (interaction.isButton() && interaction.customId === 'ticket_open') {
             
-            const existing = findTicketByUser(interaction.user.id);
-            if (existing && (existing.status === 'waiting' || existing.status === 'active')) {
-                return interaction.reply({
-                    content: `${eMoss()} У тебя уже есть активная заявка. Дождись модератора.`,
-                    flags: MessageFlags.Ephemeral
-                });
-            }
+            console.log("Нажата кнопка! Категории в конфиге:", Object.keys(config.TICKET_CATEGORIES || {}));
 
+            // Убрали проверку на активную заявку, чтобы меню всегда показывалось
+            
             const options = Object.entries(config.TICKET_CATEGORIES).map(([key, c]) => ({
                 label: c.label,
                 description: c.description,
