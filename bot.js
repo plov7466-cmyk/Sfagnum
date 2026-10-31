@@ -8,7 +8,8 @@ dotenv.config({ path: path.join(__dirname, '.env'), override: true });
 const {
     Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder,
     ButtonStyle, MessageFlags, EmbedBuilder, ContainerBuilder, TextDisplayBuilder,
-    SectionBuilder, SeparatorBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder
+    SectionBuilder, SeparatorBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder,
+    StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle
 } = require('discord.js');
 
 const config = require('./config');
@@ -148,13 +149,29 @@ async function editModMessage(modId, info, payload) {
     } catch { /* не удалось — пропускаем */ }
 }
 
+// 📝 Проверка описания
+function validateDescription(text) {
+    const min = config.TICKET_DESCRIPTION_MIN || 15;
+    const trimmed = (text || '').trim();
+
+    if (trimmed.length < min) {
+        return { ok: false, reason: `слишком коротко (минимум ${min} символов)` };
+    }
+
+    const words = trimmed.split(/\s+/).filter(Boolean);
+    if (words.length < 2) {
+        return { ok: false, reason: 'нужно хотя бы одно предложение, а не одно слово' };
+    }
+
+    return { ok: true, text: trimmed };
+}
+
 // =========================
 // 🎨 ПАНЕЛЬ (Components V2)
 // =========================
 function buildPanelV2() {
     const container = new ContainerBuilder().setAccentColor(config.COLORS.MOSS);
 
-    // 🖼️ Верхняя картинка
     container.addMediaGalleryComponents(
         new MediaGalleryBuilder().addItems(
             new MediaGalleryItemBuilder()
@@ -163,19 +180,17 @@ function buildPanelV2() {
         )
     );
 
-    // 📝 Заголовок + описание
     container.addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
             `# ${eMoss()} Связь с модератором\n\n` +
-            `Нажми на кнопку ниже — модератор получит уведомление в личные сообщения ` +
-            `и свяжется с тобой.\n\n` +
+            `Нажми на кнопку ниже, выбери тему и опиши проблему — ` +
+            `модератор получит уведомление в личные сообщения и свяжется с тобой.\n\n` +
             `*Дальше общение идёт в личке с ботом — просто пиши сообщения.*`
         )
     );
 
     container.addSeparatorComponents(new SeparatorBuilder());
 
-    // 🔘 Кнопка
     const btn = new ButtonBuilder()
         .setCustomId('ticket_open')
         .setLabel('Связаться с модератором')
@@ -193,7 +208,6 @@ function buildPanelV2() {
 
     container.addSeparatorComponents(new SeparatorBuilder());
 
-    // 🌿 Подпись Сфагнума
     container.addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
             `*Сфагнум — моховой страж Пруда. Он передаст твой зов модераторам.*`
@@ -233,20 +247,94 @@ async function restorePendingTickets() {
 }
 
 // =========================
-// 🔘 КНОПКИ
+// 🔘 КНОПКИ / СЕЛЕКТ / МОДАЛКА
 // =========================
 client.on('interactionCreate', async (interaction) => {
     try {
-        if (!interaction.isButton()) return;
-
-        // --- Открытие тикета ---
-        if (interaction.customId === 'ticket_open') {
-            const user = interaction.user;
-            const guild = interaction.guild;
-
+        // --- Открытие тикета: показываем селект категорий ---
+        if (interaction.isButton() && interaction.customId === 'ticket_open') {
             if (!interaction.member.permissions.has('Administrator')) {
                 return interaction.reply({
                     content: '❌ Только администраторы могут вызывать модераторов.',
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            const existing = findTicketByUser(interaction.user.id);
+            if (existing && (existing.status === 'waiting' || existing.status === 'active')) {
+                return interaction.reply({
+                    content: `${eMoss()} У тебя уже есть активная заявка. Дождись модератора.`,
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            const options = Object.entries(config.TICKET_CATEGORIES).map(([key, c]) => ({
+                label: c.label,
+                description: c.description,
+                value: key
+            }));
+
+            const menu = new StringSelectMenuBuilder()
+                .setCustomId('ticket_category')
+                .setPlaceholder('Выбери тему обращения')
+                .addOptions(options);
+
+            return interaction.reply({
+                content: `${eMoss()} Выбери тему обращения:`,
+                components: [new ActionRowBuilder().addComponents(menu)],
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        // --- Выбор категории: показываем модалку с описанием ---
+        if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_category') {
+            const categoryKey = interaction.values[0];
+            const category = config.TICKET_CATEGORIES[categoryKey];
+            if (!category) {
+                return interaction.update({
+                    content: '❌ Неизвестная категория. Попробуй ещё раз.',
+                    components: []
+                }).catch(() => {});
+            }
+
+            const modal = new ModalBuilder()
+                .setCustomId(`ticket_modal_${categoryKey}`)
+                .setTitle(category.label.slice(0, 45));
+
+            const input = new TextInputBuilder()
+                .setCustomId('ticket_description')
+                .setLabel('Опиши проблему одним предложением')
+                .setStyle(TextInputStyle.Paragraph)
+                .setMinLength(config.TICKET_DESCRIPTION_MIN || 15)
+                .setMaxLength(1000)
+                .setPlaceholder('Например: «Пользователь X спамит в канале #general уже 10 минут»')
+                .setRequired(true);
+
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+
+            return interaction.showModal(modal);
+        }
+
+        // --- Сабмит модалки: создаём тикет ---
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal_')) {
+            const categoryKey = interaction.customId.replace('ticket_modal_', '');
+            const category = config.TICKET_CATEGORIES[categoryKey];
+            const user = interaction.user;
+            const guild = interaction.guild;
+
+            if (!category) {
+                return interaction.reply({
+                    content: '❌ Неизвестная категория.',
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            const rawDescription = interaction.fields.getTextInputValue('ticket_description');
+            const check = validateDescription(rawDescription);
+            if (!check.ok) {
+                return interaction.reply({
+                    content: `❌ Описание не принято: ${check.reason}.\n` +
+                             `Опиши проблему хотя бы одним предложением (минимум ${config.TICKET_DESCRIPTION_MIN} символов).`,
                     flags: MessageFlags.Ephemeral
                 });
             }
@@ -260,7 +348,7 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
 
-            // 🛡️ Собираем всех модераторов со всех указанных ролей
+            // 🛡️ Собираем всех модераторов
             const allMods = new Set();
             for (const roleId of config.SUPPORT_ROLE_IDS) {
                 const role = guild.roles.cache.get(roleId);
@@ -283,6 +371,8 @@ client.on('interactionCreate', async (interaction) => {
             tickets[user.id] = {
                 status: 'waiting',
                 modId: null,
+                category: categoryKey,
+                description: check.text,
                 createdAt: Date.now(),
                 guildId: guild.id
             };
@@ -290,16 +380,17 @@ client.on('interactionCreate', async (interaction) => {
             saveTickets();
 
             const embed = new EmbedBuilder()
-                .setColor(config.COLORS.WARN)
+                .setColor(category.color || config.COLORS.WARN)
                 .setAuthor({
                     name: 'Сфагнум · новый зов о помощи',
                     iconURL: client.user.displayAvatarURL()
                 })
-                .setTitle(`${eTicket()} Новый запрос в поддержку`)
+                .setTitle(`${eTicket()} ${category.emoji} ${category.label}`)
                 .setDescription(
                     `**Пользователь:** ${user} (\`${user.tag}\`)\n` +
                     `**ID:** \`${user.id}\`\n` +
-                    `**Сервер:** ${guild.name}`
+                    `**Сервер:** ${guild.name}\n\n` +
+                    `**Описание проблемы:**\n>>> ${check.text}`
                 )
                 .setThumbnail(user.displayAvatarURL())
                 .setFooter({ text: 'Нажми «Принять», чтобы взять заявку' })
@@ -341,12 +432,13 @@ client.on('interactionCreate', async (interaction) => {
 
             saveTickets();
             return interaction.editReply({
-                content: `${eMoss()} Зов отправлен модераторам. Ожидай — с тобой свяжутся через Сфагнума.`
+                content: `${eMoss()} Зов отправлен модераторам (${category.label}). ` +
+                         `Ожидай — с тобой свяжутся через Сфагнума.`
             });
         }
 
         // --- Принятие тикета ---
-        if (interaction.customId.startsWith('ticket_accept_')) {
+        if (interaction.isButton() && interaction.customId.startsWith('ticket_accept_')) {
             const userId = interaction.customId.split('_')[2];
             const mod = interaction.user;
 
@@ -394,7 +486,6 @@ client.on('interactionCreate', async (interaction) => {
 
             await interaction.message.edit({ components: [] }).catch(() => {});
 
-            // Отправляем пользователю сообщение с кнопкой закрытия
             const closeRow = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                     .setCustomId(`ticket_close_${userId}`)
@@ -405,12 +496,11 @@ client.on('interactionCreate', async (interaction) => {
 
             const ok = await sendToUser(userId,
                 `${eMoss()} Модератор **${mod.tag}** принял твой зов.\n\n` +
-                `Опиши проблему одним сообщением — оно уйдёт модератору.\n\n` +
+                `Опиши проблему подробнее или ответь на вопросы — сообщения уйдут модератору.\n\n` +
                 `*Чтобы завершить диалог, нажми на кнопку ниже или напиши \`!end\`.*`,
                 [closeRow]
             );
 
-            // Отправляем модератору сообщение с кнопкой закрытия
             await sendToMod(mod.id,
                 `${eGreen()} Диалог с <@${userId}> начат. Все твои сообщения будут пересылаться пользователю.\n\n` +
                 `*Чтобы завершить диалог, нажми на кнопку ниже или напиши \`!end\`.*`,
@@ -433,7 +523,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // --- Отклонение ---
-        if (interaction.customId.startsWith('ticket_decline_')) {
+        if (interaction.isButton() && interaction.customId.startsWith('ticket_decline_')) {
             const userId = interaction.customId.split('_')[2];
             const t = findTicketByUser(userId);
 
@@ -456,7 +546,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // --- Закрытие тикета (кнопка) ---
-        if (interaction.customId.startsWith('ticket_close_')) {
+        if (interaction.isButton() && interaction.customId.startsWith('ticket_close_')) {
             const userId = interaction.customId.split('_')[2];
             const t = findTicketByUser(userId);
 
