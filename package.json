@@ -9,8 +9,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "discord.js": "^14.26.5",
+    "discord.js": "14.16.3",
     "dotenv": "^18.0.1",
     "express": "^5.2.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
