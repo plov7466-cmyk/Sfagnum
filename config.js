@@ -24,6 +24,49 @@ module.exports = {
         GREEN:    '1566106971151536270'
     },
 
+    // 🗂️ Категории тикетов
+    TICKET_CATEGORIES: {
+        report: {
+            label: 'Жалоба на нарушителя',
+            description: 'Кто-то нарушает правила сервера',
+            emoji: '🚨',
+            color: 0xED4245
+        },
+        appeal: {
+            label: 'Апелляция бана / мута',
+            description: 'Наказание кажется несправедливым',
+            emoji: '⚖️',
+            color: 0xF1C40F
+        },
+        mod_report: {
+            label: 'Жалоба на модератора',
+            description: 'Модератор превысил полномочия',
+            emoji: '🛡️',
+            color: 0x9B59B6
+        },
+        tech: {
+            label: 'Техническая проблема',
+            description: 'Бот/сервер/канал не работают',
+            emoji: '🔧',
+            color: 0xE67E22
+        },
+        rules: {
+            label: 'Вопрос по правилам',
+            description: 'Не понятно, что можно и что нельзя',
+            emoji: '📖',
+            color: 0x2E8B57
+        },
+        other: {
+            label: 'Другое',
+            description: 'Всё остальное',
+            emoji: '❓',
+            color: 0x95A5A6
+        }
+    },
+
+    // 📝 Минимальная длина описания проблемы (в символах)
+    TICKET_DESCRIPTION_MIN: 15,
+
     // 🖼️ Картинка панели
     PANEL_IMAGE_URL: 'https://i.postimg.cc/x12rNP86/svyaz-banner-1080x200.png',
 

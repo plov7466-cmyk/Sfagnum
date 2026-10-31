@@ -253,13 +253,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
         // --- Открытие тикета: показываем селект категорий ---
         if (interaction.isButton() && interaction.customId === 'ticket_open') {
-            if (!interaction.member.permissions.has('Administrator')) {
-                return interaction.reply({
-                    content: '❌ Только администраторы могут вызывать модераторов.',
-                    flags: MessageFlags.Ephemeral
-                });
-            }
-
+            
             const existing = findTicketByUser(interaction.user.id);
             if (existing && (existing.status === 'waiting' || existing.status === 'active')) {
                 return interaction.reply({
@@ -385,7 +379,7 @@ client.on('interactionCreate', async (interaction) => {
                     name: 'Сфагнум · новый зов о помощи',
                     iconURL: client.user.displayAvatarURL()
                 })
-                .setTitle(`${eTicket()} ${category.emoji} ${category.label}`)
+                .setTitle(`${eTicket()} ${category.label}`)
                 .setDescription(
                     `**Пользователь:** ${user} (\`${user.tag}\`)\n` +
                     `**ID:** \`${user.id}\`\n` +
