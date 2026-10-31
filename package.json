@@ -1,0 +1,16 @@
+{
+  "name": "sphagnum-bot",
+  "version": "1.0.0",
+  "description": "Discord bot Сфагнум — связь с модераторами",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "discord.js": "^14.26.5",
+    "dotenv": "^18.0.1",
+    "express": "^5.2.1"
+  }
+}
