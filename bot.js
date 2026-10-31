@@ -151,6 +151,23 @@ async function editModMessage(modId, info, payload) {
     } catch { /* не удалось — пропускаем */ }
 }
 
+// 📝 Проверка описания
+function validateDescription(text) {
+    const min = config.TICKET_DESCRIPTION_MIN || 15;
+    const trimmed = (text || '').trim();
+
+    if (trimmed.length < min) {
+        return { ok: false, reason: `слишком коротко (минимум ${min} символов)` };
+    }
+
+    const words = trimmed.split(/\s+/).filter(Boolean);
+    if (words.length < 2) {
+        return { ok: false, reason: 'нужно хотя бы одно предложение, а не одно слово' };
+    }
+
+    return { ok: true, text: trimmed };
+}
+
 // =========================
 // 🎨 ПАНЕЛЬ (Components V2)
 // =========================
@@ -168,8 +185,8 @@ function buildPanelV2() {
     container.addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
             `# ${eMoss()} Связь с модератором\n\n` +
-            `Нажми на кнопку ниже — модератор получит уведомление в личные сообщения ` +
-            `и свяжется с тобой.\n\n` +
+            `Нажми на кнопку ниже — Сфагнум напишет тебе в личку и попросит описать проблему. ` +
+            `Модератор получит уведомление и свяжется с тобой.\n\n` +
             `*Дальше общение идёт в личке с ботом — просто пиши сообщения.*`
         )
     );
@@ -224,7 +241,10 @@ client.once('clientReady', async () => {
 
 async function restorePendingTickets() {
     for (const [userId, t] of Object.entries(tickets)) {
-        if (t.status === 'waiting') {
+        if (t.status === 'awaiting_description') {
+            await sendToUser(userId,
+                `${eMoss()} Сфагнум перезапустился. Напиши, что случилось — одним предложением.`);
+        } else if (t.status === 'waiting') {
             await sendToUser(userId,
                 `${eMoss()} Сфагнум перезапустился. Твоя заявка всё ещё в очереди — ожидай модератора.`);
         }
@@ -244,10 +264,10 @@ client.on('interactionCreate', async (interaction) => {
 
     try {
         // ============================================
-        // 1) Кнопка "Связаться с модератором" → сразу создаём заявку
+        // 1) Кнопка "Связаться с модератором" → просим описание в ЛС
         // ============================================
         if (interaction.isButton() && interaction.customId === 'ticket_open') {
-            console.log('🎯 Нажата ticket_open — создаём заявку');
+            console.log('🎯 Нажата ticket_open — переводим в режим описания');
 
             const user = interaction.user;
             const guild = interaction.guild;
@@ -262,98 +282,44 @@ client.on('interactionCreate', async (interaction) => {
             await interaction.deferReply({ ephemeral: true });
 
             const existing = findTicketByUser(user.id);
-            if (existing && (existing.status === 'waiting' || existing.status === 'active')) {
+            if (existing && (existing.status === 'awaiting_description' ||
+                             existing.status === 'waiting' ||
+                             existing.status === 'active')) {
                 return interaction.editReply({
-                    content: `${eMoss()} У тебя уже есть активная заявка. Дождись модератора.`
+                    content: `${eMoss()} У тебя уже есть активная заявка. Проверь личку с ботом.`
                 });
             }
 
-            // 🛡️ Собираем всех модераторов
-            const allMods = new Set();
-            for (const roleId of config.SUPPORT_ROLE_IDS) {
-                const role = guild.roles.cache.get(roleId);
-                if (role) {
-                    for (const member of role.members.values()) {
-                        if (!member.user.bot) allMods.add(member);
-                    }
-                }
-            }
-
-            const onlineMods = [...allMods].filter(m => m.presence?.status !== 'offline');
-            const mods = onlineMods.length > 0 ? onlineMods : [...allMods];
-
-            if (mods.length === 0) {
-                return interaction.editReply({
-                    content: '😔 Сейчас нет доступных модераторов. Попробуй позже.'
-                });
-            }
-
+            // Создаём заявку в статусе "ждём описание"
             tickets[user.id] = {
-                status: 'waiting',
+                status: 'awaiting_description',
                 modId: null,
                 category: 'other',
-                description: '(без описания — пользователь напишет в ЛС)',
+                description: null,
                 createdAt: Date.now(),
                 guildId: guild.id
             };
             ticketMessages[user.id] = {};
             saveTickets();
 
-            const embed = new EmbedBuilder()
-                .setColor(config.COLORS.WARN)
-                .setAuthor({
-                    name: 'Сфагнум · новый зов о помощи',
-                    iconURL: client.user.displayAvatarURL()
-                })
-                .setTitle(`${eTicket()} Заявка на связь с модератором`)
-                .setDescription(
-                    `**Пользователь:** ${user} (\`${user.tag}\`)\n` +
-                    `**ID:** \`${user.id}\`\n` +
-                    `**Сервер:** ${guild.name}\n\n` +
-                    `**Дальше:** пользователь напишет тебе в ЛС через бота, когда ты примешь заявку.`
-                )
-                .setThumbnail(user.displayAvatarURL())
-                .setFooter({ text: 'Нажми «Принять», чтобы взять заявку' })
-                .setTimestamp();
-
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`ticket_accept_${user.id}`)
-                    .setLabel('Принять')
-                    .setStyle(ButtonStyle.Success)
-                    .setEmoji({ id: config.EMOJI.ACCEPT }),
-                new ButtonBuilder()
-                    .setCustomId(`ticket_decline_${user.id}`)
-                    .setLabel('Отклонить')
-                    .setStyle(ButtonStyle.Danger)
-                    .setEmoji({ id: config.EMOJI.DECLINE })
+            const ok = await sendToUser(user.id,
+                `${eMoss()} Привет! Ты нажал «Связаться с модератором».\n\n` +
+                `**Напиши одним предложением, что случилось.** Минимум ${config.TICKET_DESCRIPTION_MIN} символов.\n\n` +
+                `*Например: «Пользователь X спамит в канале #general уже 10 минут».*\n\n` +
+                `*Чтобы отменить — напиши \`!cancel\`.*`
             );
 
-            let sent = 0;
-            for (const mod of mods) {
-                try {
-                    const msg = await mod.send({ embeds: [embed], components: [row] });
-                    ticketMessages[user.id][mod.id] = {
-                        messageId: msg.id,
-                        channelId: msg.channelId
-                    };
-                    sent++;
-                } catch { /* закрыты ЛС */ }
-            }
-
-            if (sent === 0) {
+            if (!ok) {
                 delete tickets[user.id];
                 delete ticketMessages[user.id];
                 saveTickets();
                 return interaction.editReply({
-                    content: '❌ Не удалось доставить уведомление модераторам (у них закрыты ЛС). Сообщи администратору.'
+                    content: '❌ Не удалось написать тебе в ЛС. Открой личные сообщения от участников сервера и попробуй снова.'
                 });
             }
 
-            saveTickets();
             return interaction.editReply({
-                content: `${eMoss()} Зов отправлен модераторам. Ожидай — с тобой свяжутся через Сфагнума.\n\n` +
-                         `*Когда модератор примет заявку, просто пиши сообщения в этот ЛС.*`
+                content: `${eMoss()} Написал тебе в личку — опиши проблему там.`
             });
         }
 
@@ -549,15 +515,135 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // =========================
-// 💬 ПЕРЕСЫЛКА ЛС
+// 💬 ПЕРЕСЫЛКА ЛС + ПРИЁМ ОПИСАНИЯ
 // =========================
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (!message.channel.isDMBased()) return;
 
     const userId = message.author.id;
-
     const t = findTicketByUser(userId);
+
+    // --- Отмена ---
+    if (message.content.trim().toLowerCase() === '!cancel') {
+        if (t) {
+            delete tickets[userId];
+            delete ticketMessages[userId];
+            saveTickets();
+            await message.reply(`${eClose()} Заявка отменена.`);
+        } else {
+            await message.reply('У тебя нет активной заявки.');
+        }
+        return;
+    }
+
+    // --- Ожидаем описание ---
+    if (t && t.status === 'awaiting_description') {
+        const check = validateDescription(message.content);
+        if (!check.ok) {
+            await message.reply(
+                `❌ Описание не принято: ${check.reason}.\n` +
+                `Опиши проблему хотя бы одним предложением (минимум ${config.TICKET_DESCRIPTION_MIN} символов).\n\n` +
+                `*Чтобы отменить — напиши \`!cancel\`.*`
+            );
+            return;
+        }
+
+        // Сохраняем описание
+        t.description = check.text;
+        t.status = 'waiting';
+        saveTickets();
+
+        // Собираем модераторов
+        const guild = await client.guilds.fetch(t.guildId).catch(() => null);
+        if (!guild) {
+            delete tickets[userId];
+            delete ticketMessages[userId];
+            saveTickets();
+            await message.reply('❌ Не удалось найти сервер. Попробуй позже.');
+            return;
+        }
+
+        const allMods = new Set();
+        for (const roleId of config.SUPPORT_ROLE_IDS) {
+            const role = guild.roles.cache.get(roleId);
+            if (role) {
+                for (const member of role.members.values()) {
+                    if (!member.user.bot) allMods.add(member);
+                }
+            }
+        }
+
+        const onlineMods = [...allMods].filter(m => m.presence?.status !== 'offline');
+        const mods = onlineMods.length > 0 ? onlineMods : [...allMods];
+
+        if (mods.length === 0) {
+            delete tickets[userId];
+            delete ticketMessages[userId];
+            saveTickets();
+            await message.reply('😔 Сейчас нет доступных модераторов. Попробуй позже.');
+            return;
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor(config.COLORS.WARN)
+            .setAuthor({
+                name: 'Сфагнум · новый зов о помощи',
+                iconURL: client.user.displayAvatarURL()
+            })
+            .setTitle(`${eTicket()} Заявка на связь с модератором`)
+            .setDescription(
+                `**Пользователь:** ${message.author} (\`${message.author.tag}\`)\n` +
+                `**ID:** \`${userId}\`\n` +
+                `**Сервер:** ${guild.name}\n\n` +
+                `**Описание проблемы:**\n>>> ${check.text}`
+            )
+            .setThumbnail(message.author.displayAvatarURL())
+            .setFooter({ text: 'Нажми «Принять», чтобы взять заявку' })
+            .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`ticket_accept_${userId}`)
+                .setLabel('Принять')
+                .setStyle(ButtonStyle.Success)
+                .setEmoji({ id: config.EMOJI.ACCEPT }),
+            new ButtonBuilder()
+                .setCustomId(`ticket_decline_${userId}`)
+                .setLabel('Отклонить')
+                .setStyle(ButtonStyle.Danger)
+                .setEmoji({ id: config.EMOJI.DECLINE })
+        );
+
+        let sent = 0;
+        for (const mod of mods) {
+            try {
+                const msg = await mod.send({ embeds: [embed], components: [row] });
+                ticketMessages[userId][mod.id] = {
+                    messageId: msg.id,
+                    channelId: msg.channelId
+                };
+                sent++;
+            } catch { /* закрыты ЛС */ }
+        }
+
+        if (sent === 0) {
+            delete tickets[userId];
+            delete ticketMessages[userId];
+            saveTickets();
+            await message.reply('❌ Не удалось доставить уведомление модераторам (у них закрыты ЛС). Сообщи администратору.');
+            return;
+        }
+
+        saveTickets();
+        await message.reply(
+            `${eMoss()} Зов отправлен модераторам. Ожидай — с тобой свяжутся через Сфагнума.\n\n` +
+            `*Чтобы отменить заявку до принятия — напиши \`!cancel\`.*`
+        );
+        return;
+    }
+
+    // --- Тикет уже есть (waiting / active) ---
     if (t) {
         if (message.content.trim().toLowerCase() === '!end') {
             delete tickets[userId];
@@ -583,6 +669,7 @@ client.on('messageCreate', async (message) => {
         }
     }
 
+    // --- Модератор пишет в ЛС ---
     const modTicket = findTicketByMod(userId);
     if (modTicket) {
         if (message.content.trim().toLowerCase() === '!end') {
