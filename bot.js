@@ -29,7 +29,8 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.DirectMessages
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.MessageContent
     ],
     partials: [Partials.Channel, Partials.Message]
 });
@@ -247,39 +248,73 @@ async function restorePendingTickets() {
 }
 
 // =========================
-// 🔘 КНОПКИ / СЕЛЕКТ / МОДАЛКА
+// 🔘 ОБРАБОТКА INTERACTIONS
 // =========================
 client.on('interactionCreate', async (interaction) => {
-    try {
-        // --- Открытие тикета: показываем селект категорий ---
-        if (interaction.isButton() && interaction.customId === 'ticket_open') {
-            
-            console.log("Нажата кнопка! Категории в конфиге:", Object.keys(config.TICKET_CATEGORIES || {}));
+    // 🔍 ЛОГ: что пришло
+    console.log('▶️ Interaction:', {
+        type: interaction.type,
+        customId: interaction.customId,
+        commandName: interaction.commandName,
+        userId: interaction.user?.id
+    });
 
-            // Убрали проверку на активную заявку, чтобы меню всегда показывалось
-            
-            const options = Object.entries(config.TICKET_CATEGORIES).map(([key, c]) => ({
-                label: c.label,
-                description: c.description,
+    try {
+        // ============================================
+        // 1) Кнопка "Связаться с модератором" → меню
+        // ============================================
+        if (interaction.isButton() && interaction.customId === 'ticket_open') {
+            console.log('🎯 Нажата ticket_open. Категории:', Object.keys(config.TICKET_CATEGORIES || {}));
+
+            const categories = config.TICKET_CATEGORIES || {};
+            const entries = Object.entries(categories);
+
+            if (entries.length === 0) {
+                console.error('❌ TICKET_CATEGORIES пуст!');
+                return interaction.reply({
+                    content: '❌ В конфиге не настроены категории обращений.',
+                    ephemeral: true
+                });
+            }
+
+            const options = entries.map(([key, c]) => ({
+                label: String(c.label).slice(0, 100),
+                description: String(c.description || '').slice(0, 100),
                 value: key
             }));
 
             const menu = new StringSelectMenuBuilder()
                 .setCustomId('ticket_category')
                 .setPlaceholder('Выбери тему обращения')
+                .setMinValues(1)
+                .setMaxValues(1)
                 .addOptions(options);
 
-            return interaction.reply({
-                content: `${eMoss()} Выбери тему обращения:`,
-                components: [new ActionRowBuilder().addComponents(menu)],
-                flags: MessageFlags.Ephemeral
-            });
+            try {
+                await interaction.reply({
+                    content: `${eMoss()} Выбери тему обращения:`,
+                    components: [new ActionRowBuilder().addComponents(menu)],
+                    ephemeral: true
+                });
+                console.log('✅ Меню категорий отправлено');
+            } catch (err) {
+                console.error('❌ Ошибка отправки меню:', err);
+                if (!interaction.replied && !interaction.deferred) {
+                    await interaction.reply({
+                        content: '❌ Не удалось показать меню. Попробуй ещё раз.',
+                        ephemeral: true
+                    }).catch(() => {});
+                }
+            }
+            return;
         }
 
-        // --- Выбор категории: показываем модалку с описанием ---
+        // ============================================
+        // 2) Выбор категории → модалка
+        // ============================================
         if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_category') {
             const categoryKey = interaction.values[0];
-            const category = config.TICKET_CATEGORIES[categoryKey];
+            const category = config.TICKET_CATEGORIES?.[categoryKey];
             if (!category) {
                 return interaction.update({
                     content: '❌ Неизвестная категория. Попробуй ещё раз.',
@@ -289,7 +324,7 @@ client.on('interactionCreate', async (interaction) => {
 
             const modal = new ModalBuilder()
                 .setCustomId(`ticket_modal_${categoryKey}`)
-                .setTitle(category.label.slice(0, 45));
+                .setTitle(String(category.label).slice(0, 45));
 
             const input = new TextInputBuilder()
                 .setCustomId('ticket_description')
@@ -305,17 +340,19 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.showModal(modal);
         }
 
-        // --- Сабмит модалки: создаём тикет ---
+        // ============================================
+        // 3) Сабмит модалки → создаём тикет
+        // ============================================
         if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal_')) {
             const categoryKey = interaction.customId.replace('ticket_modal_', '');
-            const category = config.TICKET_CATEGORIES[categoryKey];
+            const category = config.TICKET_CATEGORIES?.[categoryKey];
             const user = interaction.user;
             const guild = interaction.guild;
 
             if (!category) {
                 return interaction.reply({
                     content: '❌ Неизвестная категория.',
-                    flags: MessageFlags.Ephemeral
+                    ephemeral: true
                 });
             }
 
@@ -325,11 +362,11 @@ client.on('interactionCreate', async (interaction) => {
                 return interaction.reply({
                     content: `❌ Описание не принято: ${check.reason}.\n` +
                              `Опиши проблему хотя бы одним предложением (минимум ${config.TICKET_DESCRIPTION_MIN} символов).`,
-                    flags: MessageFlags.Ephemeral
+                    ephemeral: true
                 });
             }
 
-            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            await interaction.deferReply({ ephemeral: true });
 
             const existing = findTicketByUser(user.id);
             if (existing && (existing.status === 'waiting' || existing.status === 'active')) {
@@ -427,7 +464,9 @@ client.on('interactionCreate', async (interaction) => {
             });
         }
 
-        // --- Принятие тикета ---
+        // ============================================
+        // 4) Принятие тикета
+        // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_accept_')) {
             const userId = interaction.customId.split('_')[2];
             const mod = interaction.user;
@@ -436,7 +475,7 @@ client.on('interactionCreate', async (interaction) => {
             if (!t || t.status !== 'waiting') {
                 return interaction.reply({
                     content: '⚠️ Заявку уже принял другой модератор.',
-                    flags: MessageFlags.Ephemeral
+                    ephemeral: true
                 });
             }
 
@@ -471,7 +510,7 @@ client.on('interactionCreate', async (interaction) => {
 
             await interaction.reply({
                 content: `✅ Ты принял заявку от <@${userId}>. Пиши сообщения сюда — они уйдут пользователю.`,
-                flags: MessageFlags.Ephemeral
+                ephemeral: true
             }).catch(() => {});
 
             await interaction.message.edit({ components: [] }).catch(() => {});
@@ -506,13 +545,15 @@ client.on('interactionCreate', async (interaction) => {
             if (!ok) {
                 await interaction.followUp({
                     content: '⚠️ Не удалось написать пользователю — у него закрыты ЛС.',
-                    flags: MessageFlags.Ephemeral
+                    ephemeral: true
                 }).catch(() => {});
             }
             return;
         }
 
-        // --- Отклонение ---
+        // ============================================
+        // 5) Отклонение
+        // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_decline_')) {
             const userId = interaction.customId.split('_')[2];
             const t = findTicketByUser(userId);
@@ -535,7 +576,9 @@ client.on('interactionCreate', async (interaction) => {
             return;
         }
 
-        // --- Закрытие тикета (кнопка) ---
+        // ============================================
+        // 6) Закрытие тикета (кнопка)
+        // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_close_')) {
             const userId = interaction.customId.split('_')[2];
             const t = findTicketByUser(userId);
@@ -543,7 +586,7 @@ client.on('interactionCreate', async (interaction) => {
             if (!t) {
                 return interaction.reply({
                     content: '⚠️ Заявка уже закрыта.',
-                    flags: MessageFlags.Ephemeral
+                    ephemeral: true
                 });
             }
 
@@ -553,7 +596,7 @@ client.on('interactionCreate', async (interaction) => {
             if (!isOwner && !isModerator) {
                 return interaction.reply({
                     content: '❌ У тебя нет прав закрыть эту заявку.',
-                    flags: MessageFlags.Ephemeral
+                    ephemeral: true
                 });
             }
 
@@ -569,9 +612,46 @@ client.on('interactionCreate', async (interaction) => {
                 components: []
             }).catch(() => {});
         }
+
+        // ============================================
+        // 7) Слэш-команда панели
+        // ============================================
+        if (interaction.isChatInputCommand() && interaction.commandName === 'sphagnum_panel') {
+            if (!interaction.member.permissions.has('Administrator')) {
+                return interaction.reply({
+                    content: '❌ Только администратор может вызвать панель.',
+                    ephemeral: true
+                });
+            }
+
+            try {
+                const container = buildPanelV2();
+                await interaction.channel.send({
+                    components: [container],
+                    flags: MessageFlags.IsComponentsV2
+                });
+                await interaction.reply({
+                    content: `${eMoss()} Панель Сфагнума отправлена!`,
+                    ephemeral: true
+                });
+            } catch (e) {
+                console.error('sphagnum_panel:', e);
+                await interaction.reply({
+                    content: '❌ Не удалось отправить панель.',
+                    ephemeral: true
+                });
+            }
+            return;
+        }
     } catch (e) {
-        if (e.code === 10062) return;
-        console.error('Ошибка обработки кнопки:', e);
+        if (e.code === 10062) return; // Unknown interaction
+        console.error('❌ Ошибка обработки interaction:', e);
+        if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({
+                content: '❌ Произошла ошибка. Попробуй позже.',
+                ephemeral: true
+            }).catch(() => {});
+        }
     }
 });
 
@@ -627,39 +707,6 @@ client.on('messageCreate', async (message) => {
         );
         if (ok) message.react('✅').catch(() => {});
         else await message.reply('❌ Не удалось доставить сообщение пользователю (закрыты ЛС).');
-    }
-});
-
-// =========================
-// 🧩 СЛЕШ-КОМАНДА ПАНЕЛИ
-// =========================
-client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== 'sphagnum_panel') return;
-
-    if (!interaction.member.permissions.has('Administrator')) {
-        return interaction.reply({
-            content: '❌ Только администратор может вызвать панель.',
-            flags: MessageFlags.Ephemeral
-        });
-    }
-
-    try {
-        const container = buildPanelV2();
-        await interaction.channel.send({
-            components: [container],
-            flags: MessageFlags.IsComponentsV2
-        });
-        await interaction.reply({
-            content: `${eMoss()} Панель Сфагнума отправлена!`,
-            flags: MessageFlags.Ephemeral
-        });
-    } catch (e) {
-        console.error('sphagnum_panel:', e);
-        await interaction.reply({
-            content: '❌ Не удалось отправить панель.',
-            flags: MessageFlags.Ephemeral
-        });
     }
 });
 
