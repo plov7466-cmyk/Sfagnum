@@ -42,7 +42,6 @@ const client = new Client({
 // 💾 ХРАНИЛИЩЕ
 // =========================
 const TICKETS_FILE = path.join(__dirname, 'tickets.json');
-
 let tickets = {};
 let ticketMessages = {};
 
@@ -153,20 +152,12 @@ async function editModMessage(modId, info, payload) {
     } catch { /* не удалось — пропускаем */ }
 }
 
-// 📝 Проверка описания
 function validateDescription(text) {
     const min = config.TICKET_DESCRIPTION_MIN || 15;
     const trimmed = (text || '').trim();
-
-    if (trimmed.length < min) {
-        return { ok: false, reason: `слишком коротко (минимум ${min} символов)` };
-    }
-
+    if (trimmed.length < min) return { ok: false, reason: `слишком коротко (минимум ${min} символов)` };
     const words = trimmed.split(/\s+/).filter(Boolean);
-    if (words.length < 2) {
-        return { ok: false, reason: 'нужно хотя бы одно предложение, а не одно слово' };
-    }
-
+    if (words.length < 2) return { ok: false, reason: 'нужно хотя бы одно предложение, а не одно слово' };
     return { ok: true, text: trimmed };
 }
 
@@ -244,8 +235,7 @@ client.once('clientReady', async () => {
 async function restorePendingTickets() {
     for (const [userId, t] of Object.entries(tickets)) {
         if (t.status === 'waiting') {
-            await sendToUser(userId,
-                `${eMoss()} Сфагнум перезапустился. Твоя заявка всё ещё в очереди — ожидай модератора.`);
+            await sendToUser(userId, `${eMoss()} Сфагнум перезапустился. Твоя заявка всё ещё в очереди — ожидай модератора.`);
         }
     }
 }
@@ -262,30 +252,18 @@ client.on('interactionCreate', async (interaction) => {
     });
 
     try {
-        // ============================================
         // 1) Кнопка "Связаться с модератором" → Показываем меню
-        // ============================================
         if (interaction.isButton() && interaction.customId === 'ticket_open') {
-            console.log('🎯 Нажата ticket_open — показываем меню категорий');
-
             const user = interaction.user;
             const guild = interaction.guild;
 
             if (!guild) {
-                return interaction.reply({
-                    content: '❌ Кнопку можно нажимать только на сервере.',
-                    ephemeral: true
-                });
+                return interaction.reply({ content: '❌ Кнопку можно нажимать только на сервере.', ephemeral: true });
             }
 
             const existing = findTicketByUser(user.id);
-            if (existing && (existing.status === 'awaiting_description' ||
-                             existing.status === 'waiting' ||
-                             existing.status === 'active')) {
-                return interaction.reply({
-                    content: `${eMoss()} У тебя уже есть активная заявка. Проверь личку с ботом.`,
-                    ephemeral: true
-                });
+            if (existing && ['awaiting_description', 'waiting', 'active'].includes(existing.status)) {
+                return interaction.reply({ content: `${eMoss()} У тебя уже есть активная заявка. Проверь личку с ботом.`, ephemeral: true });
             }
 
             const select = new StringSelectMenuBuilder()
@@ -301,18 +279,14 @@ client.on('interactionCreate', async (interaction) => {
                 );
             }
 
-            const row = new ActionRowBuilder().addComponents(select);
-
             return interaction.reply({
                 content: `${eMoss()} Пожалуйста, выбери тему, с которой связана твоя проблема:`,
-                components: [row],
+                components: [new ActionRowBuilder().addComponents(select)],
                 ephemeral: true
             });
         }
 
-        // ============================================
         // 2) Выбор категории из меню → Показываем модальное окно
-        // ============================================
         if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_category_select') {
             const selectedCategory = interaction.values[0];
 
@@ -329,15 +303,12 @@ client.on('interactionCreate', async (interaction) => {
                 .setMaxLength(1000)
                 .setRequired(true);
 
-            const firstActionRow = new ActionRowBuilder().addComponents(descInput);
-            modal.addComponents(firstActionRow);
+            modal.addComponents(new ActionRowBuilder().addComponents(descInput));
 
             return await interaction.showModal(modal);
         }
 
-        // ============================================
         // 2.1) Отправка модального окна с описанием
-        // ============================================
         if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal_')) {
             const user = interaction.user;
             const guild = interaction.guild;
@@ -348,12 +319,9 @@ client.on('interactionCreate', async (interaction) => {
 
             const check = validateDescription(description);
             if (!check.ok) {
-                return interaction.editReply({
-                    content: `❌ Описание не принято: ${check.reason}.\nПопробуй нажать кнопку на панели еще раз.`
-                });
+                return interaction.editReply({ content: `❌ Описание не принято: ${check.reason}.\nПопробуй нажать кнопку на панели еще раз.` });
             }
 
-            // Создаём заявку
             tickets[user.id] = {
                 status: 'waiting',
                 modId: null,
@@ -365,7 +333,7 @@ client.on('interactionCreate', async (interaction) => {
             ticketMessages[user.id] = {};
             saveTickets();
 
-            // Собираем модераторов
+            // Собираем модераторов со всех указанных ролей
             const allMods = new Set();
             for (const roleId of config.SUPPORT_ROLE_IDS) {
                 const role = guild.roles.cache.get(roleId);
@@ -390,10 +358,7 @@ client.on('interactionCreate', async (interaction) => {
 
             const embed = new EmbedBuilder()
                 .setColor(config.TICKET_CATEGORIES[selectedCategory]?.color || config.COLORS.WARN)
-                .setAuthor({
-                    name: 'Сфагнум · новый зов о помощи',
-                    iconURL: client.user.displayAvatarURL()
-                })
+                .setAuthor({ name: 'Сфагнум · новый зов о помощи', iconURL: client.user.displayAvatarURL() })
                 .setTitle(`${eTicket()} Заявка на связь с модератором`)
                 .setDescription(
                     `**Пользователь:** ${user} (\`${user.tag}\`)\n` +
@@ -436,25 +401,17 @@ client.on('interactionCreate', async (interaction) => {
             }
 
             saveTickets();
-            
-            return interaction.editReply({
-                content: `${eMoss()} Твоя заявка отправлена модераторам! Ожидай ответа здесь, на сервере.\n\n*Уведомление о начале диалога придет тебе в личку.*`
-            });
+            return interaction.editReply({ content: `${eMoss()} Твоя заявка отправлена модераторам! Ожидай ответа здесь, на сервере.\n\n*Уведомление о начале диалога придет тебе в личку.*` });
         }
 
-        // ============================================
         // 3) Принятие тикета
-        // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_accept_')) {
             const userId = interaction.customId.split('_')[2];
             const mod = interaction.user;
 
             const t = findTicketByUser(userId);
             if (!t || t.status !== 'waiting') {
-                return interaction.reply({
-                    content: '⚠️ Заявку уже принял другой модератор.',
-                    ephemeral: true
-                });
+                return interaction.reply({ content: '⚠️ Заявку уже принял другой модератор.', ephemeral: true });
             }
 
             t.status = 'active';
@@ -473,11 +430,7 @@ client.on('interactionCreate', async (interaction) => {
                 await editModMessage(mod.id, myInfo, {
                     components: [
                         new ActionRowBuilder().addComponents(
-                            new ButtonBuilder()
-                                .setCustomId('ticket_accepted_disabled')
-                                .setLabel('Принято')
-                                .setStyle(ButtonStyle.Success)
-                                .setDisabled(true)
+                            new ButtonBuilder().setCustomId('ticket_accepted_disabled').setLabel('Принято').setStyle(ButtonStyle.Success).setDisabled(true)
                         )
                     ]
                 });
@@ -486,96 +439,63 @@ client.on('interactionCreate', async (interaction) => {
             delete ticketMessages[userId];
             saveTickets();
 
-            await interaction.reply({
-                content: `✅ Ты принял заявку от <@${userId}>. Пиши сообщения сюда — они уйдут пользователю.`,
-                ephemeral: true
-            }).catch(() => {});
-
+            await interaction.reply({ content: `✅ Ты принял заявку от <@${userId}>. Пиши сообщения сюда — они уйдут пользователю.`, ephemeral: true }).catch(() => {});
             await interaction.message.edit({ components: [] }).catch(() => {});
 
             const closeRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`ticket_close_${userId}`)
-                    .setLabel('Завершить диалог')
-                    .setStyle(ButtonStyle.Danger)
-                    .setEmoji({ id: config.EMOJI.CLOSE })
+                new ButtonBuilder().setCustomId(`ticket_close_${userId}`).setLabel('Завершить диалог').setStyle(ButtonStyle.Danger).setEmoji({ id: config.EMOJI.CLOSE })
             );
 
             const ok = await sendToUser(userId,
                 `${eMoss()} Модератор **${mod.tag}** принял твой зов.\n\n` +
                 `Опиши проблему подробнее или ответь на вопросы — сообщения уйдут модератору.\n\n` +
-                `*Чтобы завершить диалог, нажми на кнопку ниже или напиши \`!end\`.*`,
-                [closeRow]
+                `*Чтобы завершить диалог, нажми на кнопку ниже или напиши \`!end\`.*`, [closeRow]
             );
 
             await sendToMod(mod.id,
                 `${eGreen()} Диалог с <@${userId}> начат. Все твои сообщения будут пересылаться пользователю.\n\n` +
                 `*Чтобы завершить диалог, нажми на кнопку ниже или напиши \`!end\`.*`,
                 [new ActionRowBuilder().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`ticket_close_${userId}`)
-                        .setLabel('Завершить диалог')
-                        .setStyle(ButtonStyle.Danger)
-                        .setEmoji({ id: config.EMOJI.CLOSE })
+                    new ButtonBuilder().setCustomId(`ticket_close_${userId}`).setLabel('Завершить диалог').setStyle(ButtonStyle.Danger).setEmoji({ id: config.EMOJI.CLOSE })
                 )]
             );
 
             if (!ok) {
-                await interaction.followUp({
-                    content: '⚠️ Не удалось написать пользователю — у него закрыты ЛС.',
-                    ephemeral: true
-                }).catch(() => {});
+                await interaction.followUp({ content: '⚠️ Не удалось написать пользователю — у него закрыты ЛС.', ephemeral: true }).catch(() => {});
             }
             return;
         }
 
-        // ============================================
         // 4) Отклонение
-        // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_decline_')) {
             const userId = interaction.customId.split('_')[2];
             const t = findTicketByUser(userId);
 
             if (t && t.status === 'waiting') {
                 const map = ticketMessages[userId] || {};
-                for (const info of Object.values(map)) {
-                    await deleteModMessage(null, info);
-                }
+                for (const info of Object.values(map)) await deleteModMessage(null, info);
                 delete tickets[userId];
                 delete ticketMessages[userId];
                 saveTickets();
-
-                await sendToUser(userId,
-                    `${eDecline()} Модератор отклонил твой зов. Попробуй позже или напиши в общий чат.`
-                );
+                await sendToUser(userId, `${eDecline()} Модератор отклонил твой зов. Попробуй позже или напиши в общий чат.`);
             }
 
             await interaction.update({ components: [] }).catch(() => {});
             return;
         }
 
-        // ============================================
         // 5) Закрытие тикета (кнопка)
-        // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_close_')) {
             const userId = interaction.customId.split('_')[2];
             const t = findTicketByUser(userId);
 
-            if (!t) {
-                return interaction.reply({
-                    content: '⚠️ Заявка уже закрыта.',
-                    ephemeral: true
-                });
-            }
+            if (!t) return interaction.reply({ content: '⚠️ Заявка уже закрыта.', ephemeral: true });
 
             const isOwner = interaction.user.id === userId;
             const isModerator = interaction.user.id === t.modId;
 
             if (!isOwner && !isModerator) {
-                return interaction.reply({
-                    content: '❌ У тебя нет прав закрыть эту заявку.',
-                    ephemeral: true
-                });
+                return interaction.reply({ content: '❌ У тебя нет прав закрыть эту заявку.', ephemeral: true });
             }
 
             delete tickets[userId];
@@ -585,50 +505,30 @@ client.on('interactionCreate', async (interaction) => {
             await sendToUser(userId, `${eClose()} Диалог с поддержкой завершён.`);
             if (t.modId) await sendToMod(t.modId, `${eClose()} Диалог с <@${userId}> завершён.`);
 
-            return interaction.update({
-                content: `${eClose()} Заявка закрыта.`,
-                components: []
-            }).catch(() => {});
+            return interaction.update({ content: `${eClose()} Заявка закрыта.`, components: [] }).catch(() => {});
         }
 
-        // ============================================
         // 6) Слэш-команда панели
-        // ============================================
         if (interaction.isChatInputCommand() && interaction.commandName === 'sphagnum_panel') {
             if (!interaction.member.permissions.has('Administrator')) {
-                return interaction.reply({
-                    content: '❌ Только администратор может вызвать панель.',
-                    ephemeral: true
-                });
+                return interaction.reply({ content: '❌ Только администратор может вызвать панель.', ephemeral: true });
             }
 
             try {
                 const container = buildPanelV2();
-                await interaction.channel.send({
-                    components: [container],
-                    flags: MessageFlags.IsComponentsV2
-                });
-                await interaction.reply({
-                    content: `${eMoss()} Панель Сфагнума отправлена!`,
-                    ephemeral: true
-                });
+                await interaction.channel.send({ components: [container], flags: MessageFlags.IsComponentsV2 });
+                await interaction.reply({ content: `${eMoss()} Панель Сфагнума отправлена!`, ephemeral: true });
             } catch (e) {
                 console.error('sphagnum_panel:', e);
-                await interaction.reply({
-                    content: '❌ Не удалось отправить панель.',
-                    ephemeral: true
-                });
+                await interaction.reply({ content: '❌ Не удалось отправить панель.', ephemeral: true });
             }
             return;
         }
     } catch (e) {
-        if (e.code === 10062) return; // Unknown interaction
+        if (e.code === 10062) return;
         console.error('❌ Ошибка обработки interaction:', e);
         if (!interaction.replied && !interaction.deferred) {
-            await interaction.reply({
-                content: '❌ Произошла ошибка. Попробуй позже.',
-                ephemeral: true
-            }).catch(() => {});
+            await interaction.reply({ content: '❌ Произошла ошибка. Попробуй позже.', ephemeral: true }).catch(() => {});
         }
     }
 });
@@ -643,7 +543,6 @@ client.on('messageCreate', async (message) => {
     const userId = message.author.id;
     const t = findTicketByUser(userId);
 
-    // --- Отмена ---
     if (message.content.trim().toLowerCase() === '!cancel') {
         if (t) {
             delete tickets[userId];
@@ -657,7 +556,6 @@ client.on('messageCreate', async (message) => {
         return;
     }
 
-    // --- Тикет уже есть (waiting / active) ---
     if (t) {
         if (message.content.trim().toLowerCase() === '!end') {
             delete tickets[userId];
@@ -674,16 +572,13 @@ client.on('messageCreate', async (message) => {
         }
 
         if (t.status === 'active' && t.modId) {
-            const ok = await sendToMod(t.modId,
-                `${eSpeech()} **${message.author.tag}** (\`${userId}\`):\n${message.content}`
-            );
+            const ok = await sendToMod(t.modId, `${eSpeech()} **${message.author.tag}** (\`${userId}\`):\n${message.content}`);
             if (ok) message.react('✅').catch(() => {});
             else await message.reply('❌ Не удалось доставить сообщение модератору (закрыты ЛС).');
             return;
         }
     }
 
-    // --- Модератор пишет в ЛС ---
     const modTicket = findTicketByMod(userId);
     if (modTicket) {
         if (message.content.trim().toLowerCase() === '!end') {
@@ -696,9 +591,7 @@ client.on('messageCreate', async (message) => {
             return;
         }
 
-        const ok = await sendToUser(modTicket.userId,
-            `${eMod()} **Модератор:**\n${message.content}`
-        );
+        const ok = await sendToUser(modTicket.userId, `${eMod()} **Модератор:**\n${message.content}`);
         if (ok) message.react('✅').catch(() => {});
         else await message.reply('❌ Не удалось доставить сообщение пользователю (закрыты ЛС).');
     }
@@ -721,7 +614,4 @@ async function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-// =========================
-// 🔐 ВХОД
-// =========================
 client.login(process.env.DISCORD_TOKEN);
