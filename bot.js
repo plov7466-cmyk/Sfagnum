@@ -9,7 +9,8 @@ const {
     Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder,
     ButtonStyle, MessageFlags, EmbedBuilder, ContainerBuilder, TextDisplayBuilder,
     SectionBuilder, SeparatorBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder,
-    StringSelectMenuBuilder, StringSelectMenuOptionBuilder
+    StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
+    ModalBuilder, TextInputBuilder, TextInputStyle
 } = require('discord.js');
 
 const config = require('./config');
@@ -186,8 +187,8 @@ function buildPanelV2() {
     container.addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
             `# ${eMoss()} Связь с модератором\n\n` +
-            `Нажми на кнопку ниже — Сфагнум напишет тебе в личку и попросит описать проблему. ` +
-            `Модератор получит уведомление и свяжется с тобой.\n\n` +
+            `Нажми на кнопку ниже, выбери тему и опиши проблему в появившемся окне. ` +
+            `Модератор получит уведомление и свяжется с тобой в личных сообщениях.\n\n` +
             `*Дальше общение идёт в личке с ботом — просто пиши сообщения.*`
         )
     );
@@ -242,10 +243,7 @@ client.once('clientReady', async () => {
 
 async function restorePendingTickets() {
     for (const [userId, t] of Object.entries(tickets)) {
-        if (t.status === 'awaiting_description') {
-            await sendToUser(userId,
-                `${eMoss()} Сфагнум перезапустился. Напиши, что случилось — одним предложением.`);
-        } else if (t.status === 'waiting') {
+        if (t.status === 'waiting') {
             await sendToUser(userId,
                 `${eMoss()} Сфагнум перезапустился. Твоя заявка всё ещё в очереди — ожидай модератора.`);
         }
@@ -313,59 +311,134 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // ============================================
-        // 2) Выбор категории из меню → Просим описание в ЛС
+        // 2) Выбор категории из меню → Показываем модальное окно
         // ============================================
         if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_category_select') {
-            const user = interaction.user;
-            const guild = interaction.guild;
             const selectedCategory = interaction.values[0];
 
-            await interaction.deferUpdate(); // Чтобы меню не висело
+            const modal = new ModalBuilder()
+                .setCustomId(`ticket_modal_${selectedCategory}`)
+                .setTitle('Описание проблемы');
 
-            const existing = findTicketByUser(user.id);
-            if (existing && (existing.status === 'awaiting_description' ||
-                             existing.status === 'waiting' ||
-                             existing.status === 'active')) {
+            const descInput = new TextInputBuilder()
+                .setCustomId('ticket_description_input')
+                .setLabel('Что случилось? (минимум 15 символов)')
+                .setStyle(TextInputStyle.Paragraph)
+                .setPlaceholder('Например: Пользователь X спамит в канале #general уже 10 минут.')
+                .setMinLength(config.TICKET_DESCRIPTION_MIN)
+                .setMaxLength(1000)
+                .setRequired(true);
+
+            const firstActionRow = new ActionRowBuilder().addComponents(descInput);
+            modal.addComponents(firstActionRow);
+
+            return await interaction.showModal(modal);
+        }
+
+        // ============================================
+        // 2.1) Отправка модального окна с описанием
+        // ============================================
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal_')) {
+            const user = interaction.user;
+            const guild = interaction.guild;
+            const selectedCategory = interaction.customId.replace('ticket_modal_', '');
+            const description = interaction.fields.getTextInputValue('ticket_description_input');
+
+            await interaction.deferReply({ ephemeral: true });
+
+            const check = validateDescription(description);
+            if (!check.ok) {
                 return interaction.editReply({
-                    content: `${eMoss()} У тебя уже есть активная заявка. Проверь личку с ботом.`,
-                    components: []
+                    content: `❌ Описание не принято: ${check.reason}.\nПопробуй нажать кнопку на панели еще раз.`
                 });
             }
 
-            // Создаём заявку в статусе "ждём описание"
+            // Создаём заявку
             tickets[user.id] = {
-                status: 'awaiting_description',
+                status: 'waiting',
                 modId: null,
                 category: selectedCategory,
-                description: null,
+                description: check.text,
                 createdAt: Date.now(),
                 guildId: guild.id
             };
             ticketMessages[user.id] = {};
             saveTickets();
 
-            const categoryLabel = config.TICKET_CATEGORIES[selectedCategory]?.label || selectedCategory;
+            // Собираем модераторов
+            const allMods = new Set();
+            for (const roleId of config.SUPPORT_ROLE_IDS) {
+                const role = guild.roles.cache.get(roleId);
+                if (role) {
+                    for (const member of role.members.values()) {
+                        if (!member.user.bot) allMods.add(member);
+                    }
+                }
+            }
 
-            const ok = await sendToUser(user.id,
-                `${eMoss()} Привет! Ты выбрал категорию: **${categoryLabel}**.\n\n` +
-                `**Напиши одним предложением, что случилось.** Минимум ${config.TICKET_DESCRIPTION_MIN} символов.\n\n` +
-                `*Например: «Пользователь X спамит в канале #general уже 10 минут».*\n\n` +
-                `*Чтобы отменить — напиши \`!cancel\`.*`
-            );
+            const onlineMods = [...allMods].filter(m => m.presence?.status !== 'offline');
+            const mods = onlineMods.length > 0 ? onlineMods : [...allMods];
 
-            if (!ok) {
+            if (mods.length === 0) {
                 delete tickets[user.id];
                 delete ticketMessages[user.id];
                 saveTickets();
-                return interaction.editReply({
-                    content: '❌ Не удалось написать тебе в ЛС. Открой личные сообщения от участников сервера и попробуй снова.',
-                    components: []
-                });
+                return interaction.editReply({ content: '😔 Сейчас нет доступных модераторов. Попробуй позже.' });
             }
 
+            const categoryLabel = config.TICKET_CATEGORIES[selectedCategory]?.label || selectedCategory;
+
+            const embed = new EmbedBuilder()
+                .setColor(config.TICKET_CATEGORIES[selectedCategory]?.color || config.COLORS.WARN)
+                .setAuthor({
+                    name: 'Сфагнум · новый зов о помощи',
+                    iconURL: client.user.displayAvatarURL()
+                })
+                .setTitle(`${eTicket()} Заявка на связь с модератором`)
+                .setDescription(
+                    `**Пользователь:** ${user} (\`${user.tag}\`)\n` +
+                    `**ID:** \`${user.id}\`\n` +
+                    `**Сервер:** ${guild.name}\n` +
+                    `**Категория:** ${categoryLabel}\n\n` +
+                    `**Описание проблемы:**\n>>> ${check.text}`
+                )
+                .setThumbnail(user.displayAvatarURL())
+                .setFooter({ text: 'Нажми «Принять», чтобы взять заявку' })
+                .setTimestamp();
+
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`ticket_accept_${user.id}`)
+                    .setLabel('Принять')
+                    .setStyle(ButtonStyle.Success)
+                    .setEmoji({ id: config.EMOJI.ACCEPT }),
+                new ButtonBuilder()
+                    .setCustomId(`ticket_decline_${user.id}`)
+                    .setLabel('Отклонить')
+                    .setStyle(ButtonStyle.Danger)
+                    .setEmoji({ id: config.EMOJI.DECLINE })
+            );
+
+            let sent = 0;
+            for (const mod of mods) {
+                try {
+                    const msg = await mod.send({ embeds: [embed], components: [row] });
+                    ticketMessages[user.id][mod.id] = { messageId: msg.id, channelId: msg.channelId };
+                    sent++;
+                } catch { /* закрыты ЛС */ }
+            }
+
+            if (sent === 0) {
+                delete tickets[user.id];
+                delete ticketMessages[user.id];
+                saveTickets();
+                return interaction.editReply({ content: '❌ Не удалось доставить уведомление модераторам (у них закрыты ЛС).' });
+            }
+
+            saveTickets();
+            
             return interaction.editReply({
-                content: `${eMoss()} Написал тебе в личку — опиши проблему там.`,
-                components: []
+                content: `${eMoss()} Твоя заявка отправлена модераторам! Ожидай ответа здесь, на сервере.\n\n*Уведомление о начале диалога придет тебе в личку.*`
             });
         }
 
@@ -561,7 +634,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // =========================
-// 💬 ПЕРЕСЫЛКА ЛС + ПРИЁМ ОПИСАНИЯ
+// 💬 ПЕРЕСЫЛКА ЛС
 // =========================
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
@@ -577,118 +650,10 @@ client.on('messageCreate', async (message) => {
             delete ticketMessages[userId];
             saveTickets();
             await message.reply(`${eClose()} Заявка отменена.`);
+            if (t.modId) await sendToMod(t.modId, `❌ Пользователь <@${userId}> отменил заявку.`);
         } else {
             await message.reply('У тебя нет активной заявки.');
         }
-        return;
-    }
-
-    // --- Ожидаем описание ---
-    if (t && t.status === 'awaiting_description') {
-        const check = validateDescription(message.content);
-        if (!check.ok) {
-            await message.reply(
-                `❌ Описание не принято: ${check.reason}.\n` +
-                `Опиши проблему хотя бы одним предложением (минимум ${config.TICKET_DESCRIPTION_MIN} символов).\n\n` +
-                `*Чтобы отменить — напиши \`!cancel\`.*`
-            );
-            return;
-        }
-
-        // Сохраняем описание
-        t.description = check.text;
-        t.status = 'waiting';
-        saveTickets();
-
-        // Собираем модераторов
-        const guild = await client.guilds.fetch(t.guildId).catch(() => null);
-        if (!guild) {
-            delete tickets[userId];
-            delete ticketMessages[userId];
-            saveTickets();
-            await message.reply('❌ Не удалось найти сервер. Попробуй позже.');
-            return;
-        }
-
-        const allMods = new Set();
-        for (const roleId of config.SUPPORT_ROLE_IDS) {
-            const role = guild.roles.cache.get(roleId);
-            if (role) {
-                for (const member of role.members.values()) {
-                    if (!member.user.bot) allMods.add(member);
-                }
-            }
-        }
-
-        const onlineMods = [...allMods].filter(m => m.presence?.status !== 'offline');
-        const mods = onlineMods.length > 0 ? onlineMods : [...allMods];
-
-        if (mods.length === 0) {
-            delete tickets[userId];
-            delete ticketMessages[userId];
-            saveTickets();
-            await message.reply('😔 Сейчас нет доступных модераторов. Попробуй позже.');
-            return;
-        }
-
-        const categoryLabel = config.TICKET_CATEGORIES[t.category]?.label || t.category;
-
-        const embed = new EmbedBuilder()
-            .setColor(config.TICKET_CATEGORIES[t.category]?.color || config.COLORS.WARN)
-            .setAuthor({
-                name: 'Сфагнум · новый зов о помощи',
-                iconURL: client.user.displayAvatarURL()
-            })
-            .setTitle(`${eTicket()} Заявка на связь с модератором`)
-            .setDescription(
-                `**Пользователь:** ${message.author} (\`${message.author.tag}\`)\n` +
-                `**ID:** \`${userId}\`\n` +
-                `**Сервер:** ${guild.name}\n` +
-                `**Категория:** ${categoryLabel}\n\n` +
-                `**Описание проблемы:**\n>>> ${check.text}`
-            )
-            .setThumbnail(message.author.displayAvatarURL())
-            .setFooter({ text: 'Нажми «Принять», чтобы взять заявку' })
-            .setTimestamp();
-
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId(`ticket_accept_${userId}`)
-                .setLabel('Принять')
-                .setStyle(ButtonStyle.Success)
-                .setEmoji({ id: config.EMOJI.ACCEPT }),
-            new ButtonBuilder()
-                .setCustomId(`ticket_decline_${userId}`)
-                .setLabel('Отклонить')
-                .setStyle(ButtonStyle.Danger)
-                .setEmoji({ id: config.EMOJI.DECLINE })
-        );
-
-        let sent = 0;
-        for (const mod of mods) {
-            try {
-                const msg = await mod.send({ embeds: [embed], components: [row] });
-                ticketMessages[userId][mod.id] = {
-                    messageId: msg.id,
-                    channelId: msg.channelId
-                };
-                sent++;
-            } catch { /* закрыты ЛС */ }
-        }
-
-        if (sent === 0) {
-            delete tickets[userId];
-            delete ticketMessages[userId];
-            saveTickets();
-            await message.reply('❌ Не удалось доставить уведомление модераторам (у них закрыты ЛС). Сообщи администратору.');
-            return;
-        }
-
-        saveTickets();
-        await message.reply(
-            `${eMoss()} Зов отправлен модераторам. Ожидай — с тобой свяжутся через Сфагнума.\n\n` +
-            `*Чтобы отменить заявку до принятия — напиши \`!cancel\`.*`
-        );
         return;
     }
 
