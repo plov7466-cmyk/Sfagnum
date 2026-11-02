@@ -8,7 +8,8 @@ dotenv.config({ path: path.join(__dirname, '.env'), override: true });
 const {
     Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder,
     ButtonStyle, MessageFlags, EmbedBuilder, ContainerBuilder, TextDisplayBuilder,
-    SectionBuilder, SeparatorBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder
+    SectionBuilder, SeparatorBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder,
+    StringSelectMenuBuilder, StringSelectMenuOptionBuilder
 } = require('discord.js');
 
 const config = require('./config');
@@ -264,10 +265,10 @@ client.on('interactionCreate', async (interaction) => {
 
     try {
         // ============================================
-        // 1) Кнопка "Связаться с модератором" → просим описание в ЛС
+        // 1) Кнопка "Связаться с модератором" → Показываем меню
         // ============================================
         if (interaction.isButton() && interaction.customId === 'ticket_open') {
-            console.log('🎯 Нажата ticket_open — переводим в режим описания');
+            console.log('🎯 Нажата ticket_open — показываем меню категорий');
 
             const user = interaction.user;
             const guild = interaction.guild;
@@ -279,14 +280,55 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
 
-            await interaction.deferReply({ ephemeral: true });
+            const existing = findTicketByUser(user.id);
+            if (existing && (existing.status === 'awaiting_description' ||
+                             existing.status === 'waiting' ||
+                             existing.status === 'active')) {
+                return interaction.reply({
+                    content: `${eMoss()} У тебя уже есть активная заявка. Проверь личку с ботом.`,
+                    ephemeral: true
+                });
+            }
+
+            const select = new StringSelectMenuBuilder()
+                .setCustomId('ticket_category_select')
+                .setPlaceholder('Выбери категорию обращения...');
+
+            for (const [key, cat] of Object.entries(config.TICKET_CATEGORIES)) {
+                select.addOptions(
+                    new StringSelectMenuOptionBuilder()
+                        .setLabel(cat.label)
+                        .setDescription(cat.description)
+                        .setValue(key)
+                );
+            }
+
+            const row = new ActionRowBuilder().addComponents(select);
+
+            return interaction.reply({
+                content: `${eMoss()} Пожалуйста, выбери тему, с которой связана твоя проблема:`,
+                components: [row],
+                ephemeral: true
+            });
+        }
+
+        // ============================================
+        // 2) Выбор категории из меню → Просим описание в ЛС
+        // ============================================
+        if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_category_select') {
+            const user = interaction.user;
+            const guild = interaction.guild;
+            const selectedCategory = interaction.values[0];
+
+            await interaction.deferUpdate(); // Чтобы меню не висело
 
             const existing = findTicketByUser(user.id);
             if (existing && (existing.status === 'awaiting_description' ||
                              existing.status === 'waiting' ||
                              existing.status === 'active')) {
                 return interaction.editReply({
-                    content: `${eMoss()} У тебя уже есть активная заявка. Проверь личку с ботом.`
+                    content: `${eMoss()} У тебя уже есть активная заявка. Проверь личку с ботом.`,
+                    components: []
                 });
             }
 
@@ -294,7 +336,7 @@ client.on('interactionCreate', async (interaction) => {
             tickets[user.id] = {
                 status: 'awaiting_description',
                 modId: null,
-                category: 'other',
+                category: selectedCategory,
                 description: null,
                 createdAt: Date.now(),
                 guildId: guild.id
@@ -302,8 +344,10 @@ client.on('interactionCreate', async (interaction) => {
             ticketMessages[user.id] = {};
             saveTickets();
 
+            const categoryLabel = config.TICKET_CATEGORIES[selectedCategory]?.label || selectedCategory;
+
             const ok = await sendToUser(user.id,
-                `${eMoss()} Привет! Ты нажал «Связаться с модератором».\n\n` +
+                `${eMoss()} Привет! Ты выбрал категорию: **${categoryLabel}**.\n\n` +
                 `**Напиши одним предложением, что случилось.** Минимум ${config.TICKET_DESCRIPTION_MIN} символов.\n\n` +
                 `*Например: «Пользователь X спамит в канале #general уже 10 минут».*\n\n` +
                 `*Чтобы отменить — напиши \`!cancel\`.*`
@@ -314,17 +358,19 @@ client.on('interactionCreate', async (interaction) => {
                 delete ticketMessages[user.id];
                 saveTickets();
                 return interaction.editReply({
-                    content: '❌ Не удалось написать тебе в ЛС. Открой личные сообщения от участников сервера и попробуй снова.'
+                    content: '❌ Не удалось написать тебе в ЛС. Открой личные сообщения от участников сервера и попробуй снова.',
+                    components: []
                 });
             }
 
             return interaction.editReply({
-                content: `${eMoss()} Написал тебе в личку — опиши проблему там.`
+                content: `${eMoss()} Написал тебе в личку — опиши проблему там.`,
+                components: []
             });
         }
 
         // ============================================
-        // 2) Принятие тикета
+        // 3) Принятие тикета
         // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_accept_')) {
             const userId = interaction.customId.split('_')[2];
@@ -411,7 +457,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // ============================================
-        // 3) Отклонение
+        // 4) Отклонение
         // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_decline_')) {
             const userId = interaction.customId.split('_')[2];
@@ -436,7 +482,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // ============================================
-        // 4) Закрытие тикета (кнопка)
+        // 5) Закрытие тикета (кнопка)
         // ============================================
         if (interaction.isButton() && interaction.customId.startsWith('ticket_close_')) {
             const userId = interaction.customId.split('_')[2];
@@ -473,7 +519,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // ============================================
-        // 5) Слэш-команда панели
+        // 6) Слэш-команда панели
         // ============================================
         if (interaction.isChatInputCommand() && interaction.commandName === 'sphagnum_panel') {
             if (!interaction.member.permissions.has('Administrator')) {
@@ -585,8 +631,10 @@ client.on('messageCreate', async (message) => {
             return;
         }
 
+        const categoryLabel = config.TICKET_CATEGORIES[t.category]?.label || t.category;
+
         const embed = new EmbedBuilder()
-            .setColor(config.COLORS.WARN)
+            .setColor(config.TICKET_CATEGORIES[t.category]?.color || config.COLORS.WARN)
             .setAuthor({
                 name: 'Сфагнум · новый зов о помощи',
                 iconURL: client.user.displayAvatarURL()
@@ -595,7 +643,8 @@ client.on('messageCreate', async (message) => {
             .setDescription(
                 `**Пользователь:** ${message.author} (\`${message.author.tag}\`)\n` +
                 `**ID:** \`${userId}\`\n` +
-                `**Сервер:** ${guild.name}\n\n` +
+                `**Сервер:** ${guild.name}\n` +
+                `**Категория:** ${categoryLabel}\n\n` +
                 `**Описание проблемы:**\n>>> ${check.text}`
             )
             .setThumbnail(message.author.displayAvatarURL())
